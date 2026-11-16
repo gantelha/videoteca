@@ -1,0 +1,7 @@
+{
+  "appId": "com.videoteca.app",
+  "appName": "Videoteca",
+  "webDir": "www",
+  "server": { "androidScheme": "http", "cleartext": true },
+  "android": { "allowMixedContent": true }
+}
