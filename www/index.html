@@ -76,10 +76,10 @@ label.g{cursor:pointer}
   <div class="sel" id="sel"><label for="ss">Temporada</label><select id="ss"></select></div>
   <div id="eps"></div>
 </dialog>
-<dialog id="cdlg"><div class="hd"><h2>Google Drive</h2><button class="b" id="ccls">Fechar</button></div><div style="padding:0 18px 18px;display:grid;gap:12px">
-<label>Pasta (link ou ID)<input id="cf" autocomplete="off"></label>
-<label>Chave de API<input id="ck" autocomplete="off" placeholder="AIza..."></label>
-<small>A pasta precisa estar compartilhada como "Qualquer pessoa com o link". A chave é gratuita (Google Cloud, Drive API) e fica só neste aparelho.</small>
+<dialog id="cdlg"><div class="hd"><h2>Lista no GitHub</h2><button class="b" id="ccls">Fechar</button></div><div style="padding:0 18px 18px;display:grid;gap:12px">
+<label>Repositório (usuário/nome)<input id="cf" autocomplete="off" placeholder="gantelha/listas"></label>
+<label>Token de acesso (só se o repositório for privado)<input id="ck" autocomplete="off" placeholder="github_pat_..."></label>
+<small>Coloque a lista na raiz do repositório, como .m3u8 ou compactada em .m3u8.gz. O token fica só neste aparelho.</small>
 <button class="b" id="cfgsave">Salvar e verificar</button></div></dialog>
 <input id="file" type="file" hidden multiple>
 <script>
@@ -149,8 +149,8 @@ async function parseStreams(streams,prog){
 
 let usMsg='';
 const setUs=t=>{usMsg=t;const e=$('.us');if(e)e.textContent=t};
-const cfg=()=>({folder:'1TGbCcz3W6_DasFqO5O2iFJ_6u3pf3uxC',key:'',...LS('cfg',{})});
-const Cap=window.Capacitor,FS=()=>Cap.Plugins.Filesystem;
+const cfg=()=>({repo:'',token:'',...LS('cfg2',{})});
+const Cap=window.Capacitor;
 function start(){side();if(cur==null){const f=idx.groups.find(g=>g.k=='f');cur=f?f.id:'hist'}show()}
 async function ingest(streams){
   setUs('Lendo a lista…');
@@ -160,38 +160,35 @@ async function ingest(streams){
   setUs(index.groups.reduce((a,g)=>a+g.c,0)+' títulos carregados.');
 }
 async function upd(force){
-  const {folder,key}=cfg();
-  if(!key){setUs('Toque em Configurar Drive e informe a chave de API.');return}
-  let lis;
+  const {repo,token}=cfg();
+  if(!repo){setUs('Toque em Configurar lista e informe o repositório do GitHub.');return}
   try{
-    setUs('Verificando o Drive…');
-    const q=new URLSearchParams({q:`'${folder}' in parents and trashed=false`,pageSize:100,key,fields:'files(id,name,modifiedTime)'});
-    const r=await fetch('https://www.googleapis.com/drive/v3/files?'+q);
-    if(!r.ok)throw new Error(r.status==404?'pasta não encontrada ou não compartilhada por link':r.status==400?'chave de API inválida':r.status==403?'chave sem permissão ou Drive API desativada':'erro '+r.status);
-    const files=(await r.json()).files.filter(f=>/\.m3u8?$/i.test(f.name));
-    if(!files.length)throw new Error('nenhuma lista .m3u/.m3u8 na pasta');
+    setUs('Verificando o GitHub…');
+    const H=a=>({Accept:a,'X-GitHub-Api-Version':'2022-11-28',...(token?{Authorization:'Bearer '+token}:{})});
+    const r=await fetch(`https://api.github.com/repos/${repo}/contents/`,{headers:H('application/vnd.github+json')});
+    if(!r.ok)throw new Error(r.status==404?'repositório não encontrado (se for privado, confira o token)':r.status==401?'token inválido ou expirado':r.status==403?'acesso negado ou limite de uso atingido':'erro '+r.status);
+    const files=(await r.json()).filter(f=>f.type=='file'&&/\.m3u8?(\.gz)?$/i.test(f.name));
+    if(!files.length)throw new Error('nenhuma lista .m3u8 ou .m3u8.gz na raiz do repositório');
     const st=LS('state',{});
-    const todo=files.filter(f=>force||!idx||st[f.id]!==f.modifiedTime);
-    if(!todo.length){setUs('Listas em dia (Drive: '+files.map(f=>f.modifiedTime).sort().pop().slice(0,16).replace('T',' ')+' UTC).');return}
-    const fs=FS(),streams=[];
-    lis=await fs.addListener('progress',p=>setUs('Baixando… '+(p.bytes/1048576|0)+' MB'));
+    if(!force&&idx&&files.every(f=>st[f.path]===f.sha)){setUs('Listas em dia.');return}
+    const streams=[];
     for(const f of files){
-      const path='listas/'+f.id+'.m3u8';
-      if(todo.includes(f)||!(await fs.stat({path,directory:'DATA'}).catch(()=>0)))
-        await fs.downloadFile({url:`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media&key=${key}`,path,directory:'DATA',recursive:true,progress:true});
-      const {uri}=await fs.getUri({path,directory:'DATA'});
-      streams.push((await fetch(Cap.convertFileSrc(uri))).body);
+      const gz=/\.gz$/i.test(f.name);
+      if(gz&&typeof DecompressionStream=='undefined')throw new Error('este celular não descompacta .gz; envie o .m3u8 sem compactar');
+      setUs('Baixando '+f.name+'…');
+      const d=await fetch(`https://api.github.com/repos/${repo}/contents/${encodeURI(f.path)}`,{headers:H('application/vnd.github.raw+json')});
+      if(!d.ok)throw new Error('falha ao baixar '+f.name+' (erro '+d.status+')');
+      streams.push(gz?d.body.pipeThrough(new DecompressionStream('gzip')):d.body);
     }
     await ingest(streams);
-    const ns={};files.forEach(f=>ns[f.id]=f.modifiedTime);save('state',ns);
-    setUs('Atualizado: '+todo.map(f=>f.name).join(', ')+'.');
-  }catch(e){setUs('Drive: '+(e.message||e))}
-  finally{if(lis)lis.remove()}
+    const ns={};files.forEach(f=>ns[f.path]=f.sha);save('state',ns);
+    setUs('Atualizado: '+files.map(f=>f.name).join(', ')+'.');
+  }catch(e){setUs('GitHub: '+(e.message||e))}
 }
-function openCfg(){const c=cfg();$('#cf').value=c.folder;$('#ck').value=c.key;$('#cdlg').showModal()}
+function openCfg(){const c=cfg();$('#cf').value=c.repo;$('#ck').value=c.token;$('#cdlg').showModal()}
 $('#cfgsave').onclick=()=>{
-  const f=$('#cf').value.trim(),m=f.match(/folders\/([\w-]+)/);
-  save('cfg',{folder:m?m[1]:f,key:$('#ck').value.trim()});$('#cdlg').close();$('#side').classList.remove('open');upd(true);
+  let r=$('#cf').value.trim();const m=r.match(/github\.com\/([^/\s]+\/[^/\s#?]+)/);if(m)r=m[1];
+  save('cfg2',{repo:r.replace(/\.git$/,''),token:$('#ck').value.trim()});$('#cdlg').close();$('#side').classList.remove('open');upd(true);
 };
 $('#ccls').onclick=()=>$('#cdlg').close();
 $('#file').onchange=async e=>{
@@ -202,12 +199,12 @@ $('#file').onchange=async e=>{
 async function init(){
   side();
   try{await loadIdx();start()}
-  catch{grid.innerHTML='<p class="empty">Nenhuma lista carregada ainda. Use <b>Configurar Drive</b> ou <b>Importar arquivo .m3u8</b> no menu.</p>';$('#side').classList.add('open')}
-  if(cfg().key)upd();
+  catch{grid.innerHTML='<p class="empty">Nenhuma lista carregada ainda. Use <b>Configurar lista</b> ou <b>Importar arquivo .m3u8</b> no menu.</p>';$('#side').classList.add('open')}
+  if(cfg().repo)upd();
 }
 function side(){
   const gs=(idx?idx.groups:[]).filter(g=>kind=='all'||g.k==kind);
-  $('#side').innerHTML='<h1>Minha videoteca</h1><button class="g" data-u="1">Atualizar do Drive</button><button class="g" data-cfg="1">Configurar Drive</button><label class="g" for="file">Importar arquivo .m3u8</label><small class="us">'+esc(usMsg)+'</small><div class="tabs">'+
+  $('#side').innerHTML='<h1>Minha videoteca</h1><button class="g" data-u="1">Atualizar lista</button><button class="g" data-cfg="1">Configurar lista</button><label class="g" for="file">Importar arquivo .m3u8</label><small class="us">'+esc(usMsg)+'</small><div class="tabs">'+
    [['all','Tudo'],['f','Filmes'],['s','Séries']].map(([k,n])=>`<button data-k="${k}" class="${kind==k?'on':''}">${n}</button>`).join('')+'</div>'+
    [['hist','Continuar assistindo',LS('hist',[]).length],['fav','Favoritos',LS('fav',[]).length]].map(([id,n,c])=>`<button class="g ${cur==id?'on':''}" data-g="${id}">${n}<small>${c}</small></button>`).join('')+
    '<div class="sep"></div>'+gs.map(g=>`<button class="g ${cur==g.id?'on':''}" data-g="${g.id}">${esc(g.n.replace(/^(FILMES|SÉRIES)\s*\|\s*/,''))}<small>${g.c}</small></button>`).join('');
